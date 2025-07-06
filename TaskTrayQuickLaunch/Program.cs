@@ -1,12 +1,14 @@
 using Microsoft.Win32;
 using System;
-using System.IO;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Resources;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Transactions;
 using System.Windows.Forms;
 using TaskTrayQuickLaunch.Properties;
 
@@ -39,6 +41,121 @@ namespace TaskTrayQuickLaunch
         }
     }
 
+
+    public class CustomToolStripMenuItem : UserControl
+    {
+        private string start_path;
+        private Action<object, MouseEventArgs> on_click;
+        private ToolTip toolTip;
+
+        public void SetSelected(bool selected)
+        {
+            // Change the background color based on selection state
+            this.BackColor = selected ? SystemColors.Highlight : SystemColors.Control;
+        }
+
+        private void CutomeMouseClick(object sender, MouseEventArgs e)
+        {
+            // Handle click event
+            if (e.Button == MouseButtons.Right)
+            {
+            }
+            else
+            {
+                System.Diagnostics.Process.Start(new ProcessStartInfo
+                {
+                    FileName = start_path,
+                    UseShellExecute = true // Use this to open files with their associated applications
+                });
+            }
+
+            on_click(sender, e);
+        }
+
+        private void CustomMouseLeave(object sender, EventArgs e)
+        {
+            // Reset background color when mouse leaves
+            SetSelected(false);
+            toolTip.Hide((Control)sender);
+        }
+
+        private void CustomMouseEnter(object sender, EventArgs e)
+        {
+            // Change background color when mouse enters
+            SetSelected(true);
+        }
+
+        public CustomToolStripMenuItem(String text, Image icon, String path, Action<object , MouseEventArgs> onclick)
+        {
+            InitializeComponent(text, icon, path, onclick);
+        }
+        private void InitializeComponent(String text, Image icon, String path, Action<object, MouseEventArgs> onclick)
+        {
+            this.SuspendLayout();
+            // 
+            // CustomToolStripMenuItem
+            // 
+            this.Name = "CustomToolStripMenuItem";
+            this.start_path = path;
+            this.on_click = onclick;
+            this.ResumeLayout(false);
+            this.BackColor = SystemColors.Control;
+            this.AutoSize = true;
+            this.Padding = new Padding(4);
+
+            var pictureBox = new PictureBox
+            {
+                Image = icon,
+                Size = new Size(16, 16),
+                SizeMode = PictureBoxSizeMode.StretchImage,
+                Margin = new Padding(0, 0, 8, 0)
+            };
+
+            var label = new Label
+            {
+                Text = text,
+//              AutoSize = true,
+                Size = new Size(150-16, 16),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Dock = DockStyle.Fill
+            };
+            var layout = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Padding = new Padding(0),
+                Margin = new Padding(0),
+                Size = new Size(150, 16),  // 明示的に高さを固定
+                AutoSize = true           // 自動サイズ調整を無効化
+            };
+
+            toolTip = new ToolTip();
+            toolTip.ShowAlways = true;
+            toolTip.Active = true;
+            toolTip.AutomaticDelay = 500;
+            toolTip.SetToolTip(label, path);
+            toolTip.SetToolTip(pictureBox, path);
+//          toolTip.SetToolTip(layout, path);
+
+            layout.Controls.Add(pictureBox);
+            layout.Controls.Add(label);
+
+            this.Controls.Add(layout);
+            this.MouseLeave += CustomMouseLeave;
+            this.MouseEnter += CustomMouseEnter;
+            this.MouseClick += CutomeMouseClick;
+            label.MouseLeave += CustomMouseLeave;
+            label.MouseEnter += CustomMouseEnter;
+            label.MouseClick += CutomeMouseClick;
+            pictureBox.MouseLeave += CustomMouseLeave;
+            pictureBox.MouseEnter += CustomMouseEnter;
+            pictureBox.MouseClick += CutomeMouseClick;
+            layout.MouseLeave += CustomMouseLeave;
+            layout.MouseEnter += CustomMouseEnter;
+            label.MouseClick += CutomeMouseClick;
+        }
+    }
+
     public class TTQLApplicationContext : ApplicationContext
     {
         private const String INI_FILE_NAME = "TaskTrayQuickLaunch.ini";
@@ -51,11 +168,12 @@ namespace TaskTrayQuickLaunch
         private ToolStripMenuItem menu_add_delete;
         private ToolStripMenuItem menu_exit;
         private ToolStripTextBox menu_path_edit;
-        private Point menu_position;
+        private System.Windows.Forms.Timer closeTimer;
+        private bool suppressShow = false;
 
-        private bool sub_menu_add_mode;
         private string explorer_path;
         private string browser_path;
+        private string chrome_path = "";
         private List<ShortCutItem> shortCutList = new List<ShortCutItem>();
 
         private struct ShortCutItem
@@ -64,7 +182,7 @@ namespace TaskTrayQuickLaunch
             public string Path;
             public Icon Icon;
         }
-
+        
         public TTQLApplicationContext()
         {
             Application.ApplicationExit += new EventHandler(OnApplicationExit);
@@ -73,10 +191,9 @@ namespace TaskTrayQuickLaunch
 
             LoadShortCutIni();
             main_menu = new ContextMenuStrip(new Container());
-            main_menu.Closing += main_menu_OnClose;
+            main_menu.AutoClose = false;
             BuildMainMenuItems();
 
-            sub_menu_add_mode = false;
             sub_menu = new ContextMenuStrip(new Container());
             BuildSubMenuItems();
 
@@ -88,7 +205,41 @@ namespace TaskTrayQuickLaunch
 
             notifyIcon.MouseMove += IconOnMouseMove;
             notifyIcon.MouseClick += Icon_OnClick;
-//          notifyIcon.ContextMenuStrip = sub_menu;
+            main_menu.ContextMenuStrip = sub_menu;
+            main_menu.KeyPress += main_menu_KeyPress;
+
+            /* MouseMoveで表示したメインメニューを、10秒でCloseする */
+            closeTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 10000, // 10秒
+                Enabled = false
+            };
+            closeTimer.Tick += (s, e) =>
+            {
+                if (main_menu.Visible)
+                {
+                    main_menu.Close();
+                }
+                closeTimer.Stop();
+                suppressShow = false;
+            };
+
+        }
+
+        private void main_menu_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            if (e.KeyChar == (char)Keys.Escape)
+            {
+                System.Diagnostics.Debug.WriteLine("Escape key pressed in main menu.");
+            }
+            else if (e.KeyChar == (char)Keys.Enter)
+            {
+                System.Diagnostics.Debug.WriteLine("Enter key pressed in main menu.");
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine("Key pressed in main menu: " + e.KeyChar);
+            }
         }
 
         private string ResolveEnvironmentVariables(string path)
@@ -132,10 +283,44 @@ namespace TaskTrayQuickLaunch
                                 // If the association is for folders, set the explorer path
                                 explorer_path = ResolveEnvironmentVariables(command);
                             }
+                            else if (assoc.ToUpper() == "CHROMEHTML")
+                            {
+                                // If the association is for Chrome, set the Chrome path
+                                Match match = Regex.Match(command, "\"([^\"]+\\.exe)\"");
+                                if (match.Success)
+                                {
+                                    // Extract the path to the Chrome executable
+                                    command = match.Groups[1].Value;
+                                    command = ResolveEnvironmentVariables(command);
+                                    System.Diagnostics.Debug.WriteLine($"Chrome Path: {command}");
+                                    if (string.IsNullOrEmpty(chrome_path))
+                                    {
+                                        chrome_path = command; // Set Chrome path
+                                    }
+                                }
+                                else
+                                {
+                                    System.Diagnostics.Debug.WriteLine("No valid Chrome path found in command: " + command);
+                                }
+                            }
                             else if (assoc.ToUpper() == "HTTP" || assoc.ToUpper() == "HTTPS")
                             {
-                                // If the association is for HTTP/HTTPS, set the browser path
-                                browser_path = command;
+                                Match match = Regex.Match(command, "\"([^\"]+\\.exe)\"");
+                                if (match.Success)
+                                {
+                                    // Extract the path to the browser executable
+                                    command = match.Groups[1].Value;
+                                    command = ResolveEnvironmentVariables(command);
+                                    System.Diagnostics.Debug.WriteLine($"Browser Path: {command}");
+                                    if (string.IsNullOrEmpty(browser_path))
+                                    {
+                                        browser_path = command; // Set browser path if not already set
+                                    }
+                                }
+                                else
+                                {
+                                    System.Diagnostics.Debug.WriteLine("No valid browser path found in command: " + command);
+                                }
                             }
                         }
                     }
@@ -167,25 +352,32 @@ namespace TaskTrayQuickLaunch
             menu_add_folder = new ToolStripMenuItem("add Folder", null, AddFolderShortcut);
             sub_menu.Items.Add(menu_add_folder);
 
-            if (sub_menu_add_mode)
-            {
-                menu_path_edit = new ToolStripTextBox();
-                menu_path_edit.Text = "Path or URL";
-                menu_path_edit.ToolTipText = "Input File / Folder path or URL";
-                menu_path_edit.KeyDown += OnKeyDown;
-                sub_menu.Items.Add(menu_path_edit);
-            }
-            else
-            {
-                menu_add_path = new ToolStripMenuItem("add Path", null, AddPathShortcut);
-                sub_menu.Items.Add(menu_add_path);
-            }
+            menu_add_path = new ToolStripMenuItem("add Path", null, AddPathShortcut);
+            sub_menu.Items.Add(menu_add_path);
 
             menu_add_delete = new ToolStripMenuItem("delete", null, DelShortcut);
             sub_menu.Items.Add(menu_add_delete);
 
             menu_exit = new ToolStripMenuItem("Exit", null, Exit);
             sub_menu.Items.Add(menu_exit);
+        }
+
+
+        private void main_menu_onClick(object sender, MouseEventArgs e)
+        {
+            System.Diagnostics.Debug.WriteLine("main_menu_onClick : " + e.Button);
+            if (e.Button == MouseButtons.Left)
+            {
+                main_menu.BeginInvoke(new Action(() =>
+                {
+                    main_menu.Close();
+                }));
+                
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                
+            }
         }
 
         private void BuildMainMenuItems()
@@ -195,6 +387,7 @@ namespace TaskTrayQuickLaunch
             // Add shortcuts from the list
             foreach (var item in shortCutList)
             {
+#if false
                 ToolStripMenuItem menuItem = new ToolStripMenuItem(item.Name, item.Icon.ToBitmap(), (s, e) =>
                 {
                     System.Diagnostics.Process.Start(new ProcessStartInfo
@@ -203,10 +396,23 @@ namespace TaskTrayQuickLaunch
                         UseShellExecute = true // Use this to open files with their associated applications
                     });
                 });
+#else
+                CustomToolStripMenuItem custom_item = new CustomToolStripMenuItem(item.Name, item.Icon?.ToBitmap(), item.Path, main_menu_onClick)
+                {
+                    Tag = item.Path,
+                    AutoSize = true,
+                };
+                ToolStripControlHost menuItem = new ToolStripControlHost(custom_item)
+                {
+                    AutoSize = true,
+                    Padding =  Padding.Empty,
+                    Margin =  Padding.Empty,
+                };
+#endif
+                menuItem.MouseMove += IconOnMouseMove;
                 main_menu.Items.Add(menuItem);
             }
         }
-
 
         private void AddShortCutItem(string name, string path)
         {
@@ -237,7 +443,14 @@ namespace TaskTrayQuickLaunch
             else if (Uri.IsWellFormedUriString(path, UriKind.Absolute))
             {
                 // If it's a URL, use a browser icon
-                item.Icon = Icon.ExtractAssociatedIcon(browser_path);
+                if (string.IsNullOrEmpty(chrome_path))
+                {
+                    item.Icon = Icon.ExtractAssociatedIcon(browser_path);
+                }
+                else
+                {
+                    item.Icon = Icon.ExtractAssociatedIcon(chrome_path);
+                }
             }
             else
             {
@@ -305,7 +518,13 @@ namespace TaskTrayQuickLaunch
         private void DisplayMainMenu()
         {
             // Show the main menu at the current cursor position
-            main_menu.Show(new Point(Cursor.Position.X, Cursor.Position.Y - main_menu.Height - 32));
+            main_menu.Show(new Point(Cursor.Position.X - 220, Cursor.Position.Y - main_menu.Height - 32));
+        }
+
+        private void DisplaySubMenu()
+        {
+            // Show the main menu at the current cursor position
+            sub_menu.Show(new Point(Cursor.Position.X, Cursor.Position.Y - sub_menu.Height - 32));
         }
 
         private void Icon_OnClick(object sender, MouseEventArgs e)
@@ -314,7 +533,12 @@ namespace TaskTrayQuickLaunch
             {
                 if (main_menu.Visible)
                 {
-                    main_menu.Hide();
+                    System.Diagnostics.Debug.WriteLine("main_menu.Hide();");
+                    main_menu.Close();
+                    suppressShow = true; // Suppress showing the main menu again
+                    closeTimer.Stop(); // Start the timer to close the menu after 1 second
+                    closeTimer.Interval = 1000;
+                    closeTimer.Start(); // Start the timer to close the menu after 1 second
                 }
                 else
                 {
@@ -328,17 +552,26 @@ namespace TaskTrayQuickLaunch
                 {
                     main_menu.Hide();
                 }
-                sub_menu.Show(Cursor.Position);
+                DisplaySubMenu();
             }
         }
 
         private void IconOnMouseMove(object sender, System.Windows.Forms.MouseEventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine("MouseMove: " + e.Location);
+//          System.Diagnostics.Debug.WriteLine("MouseMove: " + e.Location);
+            if (suppressShow)
+            {
+                return; // Do not show the main menu if suppressed
+            }
+
             if ((main_menu.Visible == false) && (sub_menu.Visible == false))
             {
                 DisplayMainMenu();
             }
+
+            closeTimer.Stop();
+            closeTimer.Interval = 10000;
+            closeTimer.Start();
         }
 
         private void OnApplicationExit(object sender, EventArgs e)
@@ -346,16 +579,13 @@ namespace TaskTrayQuickLaunch
 
         }
 
-        private void main_menu_OnClose(object sender, ToolStripDropDownClosingEventArgs e)
-        {
-
-        }
 
         private void AddPathShortcut(object sender, EventArgs e)
         {
-            sub_menu_add_mode = true;
             BuildSubMenuItems();
-            sub_menu.Show(sub_menu.Location);
+//          sub_menu.Hide();
+//          sub_menu.Show(sub_menu.Location);
+            sub_menu.Invalidate();
         }
 
         private bool IsPathVarid(string path)
@@ -377,12 +607,9 @@ namespace TaskTrayQuickLaunch
             if (e.KeyCode == Keys.Enter)
             {
                 System.Diagnostics.Debug.WriteLine("OnPathEnter : " + menu_path_edit.Text);
-                sub_menu_add_mode = false;
-                //              e.Handled = true;
                 e.SuppressKeyPress = true;
                 if (IsPathVarid(menu_path_edit.Text))
                 {
-                    sub_menu_add_mode = false;
                     AddShortCutItem(Path.GetFileNameWithoutExtension(menu_path_edit.Text), menu_path_edit.Text);
                     sub_menu.Hide();
                 }
@@ -403,7 +630,8 @@ namespace TaskTrayQuickLaunch
                     string selectedPath = folderBrowserDialog.SelectedPath;
                     if (Directory.Exists(selectedPath))
                     {
-                        AddShortCutItem(Path.GetFileNameWithoutExtension(selectedPath), selectedPath);
+                        string[] paths = selectedPath.Split('\\');
+                        AddShortCutItem(paths[paths.Length -1], selectedPath);
                         SaveShortCutIni();
                     }
                 }
