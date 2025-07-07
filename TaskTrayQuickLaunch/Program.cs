@@ -48,6 +48,11 @@ namespace TaskTrayQuickLaunch
         private Action<object, MouseEventArgs> on_click;
         private ToolTip toolTip;
 
+        public bool IsSelected()
+        {   // Check if the background color is the highlight color
+            return this.BackColor == SystemColors.Highlight;
+        }
+
         public void SetSelected(bool selected)
         {
             // Change the background color based on selection state
@@ -89,6 +94,7 @@ namespace TaskTrayQuickLaunch
         {
             InitializeComponent(text, icon, path, onclick);
         }
+
         private void InitializeComponent(String text, Image icon, String path, Action<object, MouseEventArgs> onclick)
         {
             this.SuspendLayout();
@@ -162,10 +168,14 @@ namespace TaskTrayQuickLaunch
         private NotifyIcon notifyIcon;
         private ContextMenuStrip sub_menu;
         private ContextMenuStrip main_menu;
+        private ToolStripMenuItem menu_version;
         private ToolStripMenuItem menu_add_file;
         private ToolStripMenuItem menu_add_folder;
         private ToolStripMenuItem menu_add_path;
-        private ToolStripMenuItem menu_add_delete;
+        private ToolStripMenuItem menu_delete;
+        private ToolStripMenuItem menu_move_up;
+        private ToolStripMenuItem menu_move_down;
+        private ToolStripMenuItem menu_close;
         private ToolStripMenuItem menu_exit;
         private ToolStripTextBox menu_path_edit;
         private System.Windows.Forms.Timer closeTimer;
@@ -182,11 +192,28 @@ namespace TaskTrayQuickLaunch
             public string Path;
             public Icon Icon;
         }
-        
+
+        private void sub_menu_Opening(object sender, CancelEventArgs e)
+        {
+            ToolStripItem toolStripItem = selected_item();
+            if (toolStripItem != null)
+            {
+                // If an item is selected, enable the delete option
+                menu_delete.Enabled = true;
+                menu_move_up.Enabled = true;
+                menu_move_down.Enabled = true;
+            }
+            else
+            {
+                // No item selected, disable the delete option
+                menu_delete.Enabled = false;
+                menu_move_down.Enabled = false;
+                menu_move_up.Enabled = false;
+            }
+        }
+
         public TTQLApplicationContext()
         {
-            Application.ApplicationExit += new EventHandler(OnApplicationExit);
-
             GetFtypeText();
 
             LoadShortCutIni();
@@ -194,7 +221,7 @@ namespace TaskTrayQuickLaunch
             main_menu.AutoClose = false;
             BuildMainMenuItems();
 
-            sub_menu = new ContextMenuStrip(new Container());
+            ConstructSubMenuItems();
             BuildSubMenuItems();
 
             notifyIcon = new NotifyIcon()
@@ -332,6 +359,34 @@ namespace TaskTrayQuickLaunch
             }
         }
 
+        private void ConstructSubMenuItems()
+        {
+            // Create the sub-menu items
+            sub_menu = new ContextMenuStrip(new Container());
+            sub_menu.Opening += sub_menu_Opening;
+            menu_version = new ToolStripMenuItem($"{Application.ProductName} v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}")
+            {
+                Enabled = false
+            };
+            menu_add_file = new ToolStripMenuItem("add File", null, AddFileShortcut);
+            menu_add_folder = new ToolStripMenuItem("add Folder", null, AddFolderShortcut);
+            menu_add_path = new ToolStripMenuItem("add Path", null, AddPathShortcut);
+            menu_delete = new ToolStripMenuItem("delete", null, DelShortcut);
+            menu_exit = new ToolStripMenuItem("Exit", null, Exit);
+            menu_move_down = new ToolStripMenuItem("Move Down", null, (s, e) =>
+            {
+                // Implement move down logic here
+            });
+            menu_move_up = new ToolStripMenuItem("Move Up", null, (s, e) =>
+            {
+                // Implement move up logic here
+            });
+            menu_close = new ToolStripMenuItem("Close", null, (s, e) =>
+            {
+                main_menu.Close();
+            });
+        }
+
         private void BuildSubMenuItems()
         {
             // Clear existing items
@@ -339,26 +394,17 @@ namespace TaskTrayQuickLaunch
             // Add shortcuts from the list
             sub_menu.Items.AddRange(new ToolStripItem[]
             {
-                new ToolStripMenuItem($"{Application.ProductName} v{Application.ProductVersion}")
-                {
-                    Enabled = false
-                },
+                menu_version,
                 new ToolStripSeparator()
             });
 
-            menu_add_file = new ToolStripMenuItem("add File", null, AddFileShortcut);
             sub_menu.Items.Add(menu_add_file);
-
-            menu_add_folder = new ToolStripMenuItem("add Folder", null, AddFolderShortcut);
             sub_menu.Items.Add(menu_add_folder);
-
-            menu_add_path = new ToolStripMenuItem("add Path", null, AddPathShortcut);
             sub_menu.Items.Add(menu_add_path);
-
-            menu_add_delete = new ToolStripMenuItem("delete", null, DelShortcut);
-            sub_menu.Items.Add(menu_add_delete);
-
-            menu_exit = new ToolStripMenuItem("Exit", null, Exit);
+            sub_menu.Items.Add(menu_move_up);
+            sub_menu.Items.Add(menu_move_down);
+            sub_menu.Items.Add(menu_delete);
+            sub_menu.Items.Add(menu_close);
             sub_menu.Items.Add(menu_exit);
         }
 
@@ -378,6 +424,22 @@ namespace TaskTrayQuickLaunch
             {
                 
             }
+        }
+
+        private ToolStripItem selected_item()
+        {
+            // Get the currently selected item in the main menu
+            if (main_menu != null && main_menu.Items.Count > 0)
+            {
+                foreach (ToolStripItem item in main_menu.Items)
+                {
+                    if (item is ToolStripControlHost controlHost && controlHost.Control is CustomToolStripMenuItem customItem && customItem.IsSelected())
+                    {
+                        return item;
+                    }
+                }
+            }
+            return null; // No item is selected
         }
 
         private void BuildMainMenuItems()
@@ -519,6 +581,7 @@ namespace TaskTrayQuickLaunch
         {
             // Show the main menu at the current cursor position
             main_menu.Show(new Point(Cursor.Position.X - 220, Cursor.Position.Y - main_menu.Height - 32));
+            main_menu.Focus();
         }
 
         private void DisplaySubMenu()
@@ -574,50 +637,9 @@ namespace TaskTrayQuickLaunch
             closeTimer.Start();
         }
 
-        private void OnApplicationExit(object sender, EventArgs e)
-        {
-
-        }
-
-
         private void AddPathShortcut(object sender, EventArgs e)
         {
-            BuildSubMenuItems();
-//          sub_menu.Hide();
-//          sub_menu.Show(sub_menu.Location);
-            sub_menu.Invalidate();
-        }
 
-        private bool IsPathVarid(string path)
-        {
-            if (File.Exists(path) || Directory.Exists(path))
-            {
-                return true; // Valid path
-            }
-            else if (Uri.IsWellFormedUriString(path, UriKind.Absolute))
-            {
-                return true; // Valid URL
-            }   
-
-            return false; // Invalid path or URL
-        }
-
-        private void OnKeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter)
-            {
-                System.Diagnostics.Debug.WriteLine("OnPathEnter : " + menu_path_edit.Text);
-                e.SuppressKeyPress = true;
-                if (IsPathVarid(menu_path_edit.Text))
-                {
-                    AddShortCutItem(Path.GetFileNameWithoutExtension(menu_path_edit.Text), menu_path_edit.Text);
-                    sub_menu.Hide();
-                }
-                else
-                {
-
-                }
-            }
         }
 
         private void AddFolderShortcut(object sender, EventArgs e)
@@ -633,6 +655,7 @@ namespace TaskTrayQuickLaunch
                         string[] paths = selectedPath.Split('\\');
                         AddShortCutItem(paths[paths.Length -1], selectedPath);
                         SaveShortCutIni();
+                        BuildMainMenuItems();
                     }
                 }
             }
@@ -655,6 +678,7 @@ namespace TaskTrayQuickLaunch
                     System.Diagnostics.Debug.WriteLine("Added shortcut: " + filePath);
                     AddShortCutItem(Path.GetFileNameWithoutExtension(filePath), filePath);
                     SaveShortCutIni();
+                    BuildMainMenuItems();
                 }
             }
             else
