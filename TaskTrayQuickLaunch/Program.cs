@@ -5,11 +5,14 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Resources;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Transactions;
 using System.Windows.Forms;
+using System.Windows.Forms.VisualStyles;
 using TaskTrayQuickLaunch.Properties;
 
 
@@ -59,6 +62,11 @@ namespace TaskTrayQuickLaunch
             this.BackColor = selected ? SystemColors.Highlight : SystemColors.Control;
         }
 
+        private void CutomeEnter(object sender, EventArgs e)
+        {
+
+        }
+
         private void CutomeMouseClick(object sender, MouseEventArgs e)
         {
             // Handle click event
@@ -92,10 +100,11 @@ namespace TaskTrayQuickLaunch
 
         public CustomToolStripMenuItem(String text, Image icon, String path, Action<object , MouseEventArgs> onclick)
         {
-            InitializeComponent(text, icon, path, onclick);
+            InitializeComponent(text, icon, path);
+            this.on_click = onclick;
         }
 
-        private void InitializeComponent(String text, Image icon, String path, Action<object, MouseEventArgs> onclick)
+        private void InitializeComponent(String text, Image icon, String path)
         {
             this.SuspendLayout();
             // 
@@ -103,7 +112,6 @@ namespace TaskTrayQuickLaunch
             // 
             this.Name = "CustomToolStripMenuItem";
             this.start_path = path;
-            this.on_click = onclick;
             this.ResumeLayout(false);
             this.BackColor = SystemColors.Control;
             this.AutoSize = true;
@@ -116,15 +124,10 @@ namespace TaskTrayQuickLaunch
                 SizeMode = PictureBoxSizeMode.StretchImage,
                 Margin = new Padding(0, 0, 8, 0)
             };
+            pictureBox.MouseLeave += CustomMouseLeave;
+            pictureBox.MouseEnter += CustomMouseEnter;
+            pictureBox.MouseClick += CutomeMouseClick;
 
-            var label = new Label
-            {
-                Text = text,
-//              AutoSize = true,
-                Size = new Size(150-16, 16),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Dock = DockStyle.Fill
-            };
             var layout = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.LeftToRight,
@@ -134,31 +137,49 @@ namespace TaskTrayQuickLaunch
                 Size = new Size(150, 16),  // 明示的に高さを固定
                 AutoSize = true           // 自動サイズ調整を無効化
             };
+            layout.MouseLeave += CustomMouseLeave;
+            layout.MouseEnter += CustomMouseEnter;
+            layout.MouseClick += CutomeMouseClick;
+            layout.Controls.Add(pictureBox);
 
             toolTip = new ToolTip();
             toolTip.ShowAlways = true;
             toolTip.Active = true;
             toolTip.AutomaticDelay = 500;
-            toolTip.SetToolTip(label, path);
             toolTip.SetToolTip(pictureBox, path);
-//          toolTip.SetToolTip(layout, path);
+            if (text != "")
+            {
+                var label = new System.Windows.Forms.Label
+                {
+                    Text = text,
+                    Size = new Size(150 - 16, 16),
+//                  TextAlign = ContentAlignment.MiddleLeft,
+                    Dock = DockStyle.Fill
+                };
+                label.MouseLeave += CustomMouseLeave;
+                label.MouseEnter += CustomMouseEnter;
+                label.MouseClick += CutomeMouseClick;
 
-            layout.Controls.Add(pictureBox);
-            layout.Controls.Add(label);
+                toolTip.SetToolTip(label, path);
+                layout.Controls.Add(label);
+            }
+            else
+            {
+                var text_box = new TextBox
+                {
+                    Text = "",
+                    Size = new Size(150 - 16, 16),
+                    Dock = DockStyle.Fill
+                };
+
+                text_box.Enter += CutomeEnter;
+                layout.Controls.Add(text_box);
+            }
 
             this.Controls.Add(layout);
             this.MouseLeave += CustomMouseLeave;
             this.MouseEnter += CustomMouseEnter;
             this.MouseClick += CutomeMouseClick;
-            label.MouseLeave += CustomMouseLeave;
-            label.MouseEnter += CustomMouseEnter;
-            label.MouseClick += CutomeMouseClick;
-            pictureBox.MouseLeave += CustomMouseLeave;
-            pictureBox.MouseEnter += CustomMouseEnter;
-            pictureBox.MouseClick += CutomeMouseClick;
-            layout.MouseLeave += CustomMouseLeave;
-            layout.MouseEnter += CustomMouseEnter;
-            label.MouseClick += CutomeMouseClick;
         }
     }
 
@@ -190,6 +211,7 @@ namespace TaskTrayQuickLaunch
         {
             public string Name;
             public string Path;
+            public string Group;
             public Icon Icon;
         }
 
@@ -364,7 +386,10 @@ namespace TaskTrayQuickLaunch
             // Create the sub-menu items
             sub_menu = new ContextMenuStrip(new Container());
             sub_menu.Opening += sub_menu_Opening;
-            menu_version = new ToolStripMenuItem($"{Application.ProductName} v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}")
+            var infoVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            menu_version = new ToolStripMenuItem($"{Application.ProductName} v{infoVersion}")
+//          menu_version = new ToolStripMenuItem($"{Application.ProductName} v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}")
+//          menu_version = new ToolStripMenuItem($"{Application.ProductName} v{Assembly.GetExecutingAssembly().GetName().Version}")
             {
                 Enabled = false
             };
@@ -418,7 +443,6 @@ namespace TaskTrayQuickLaunch
                 {
                     main_menu.Close();
                 }));
-                
             }
             else if (e.Button == MouseButtons.Right)
             {
@@ -476,7 +500,7 @@ namespace TaskTrayQuickLaunch
             }
         }
 
-        private void AddShortCutItem(string name, string path)
+        private void AddShortCutItem(string name, string path, string group)
         {
             foreach (var tmp_item in shortCutList)
             {
@@ -491,6 +515,7 @@ namespace TaskTrayQuickLaunch
             {
                 Name = name,
                 Path = path,
+                Group = group,
                 Icon = null // Default icon, will be set later if file exists
             };
             if (File.Exists(path))
@@ -537,7 +562,17 @@ namespace TaskTrayQuickLaunch
                     var parts = line.Split('|');
                     if (parts.Length == 2)
                     {
-                        AddShortCutItem(parts[0].Trim(), parts[1].Trim());
+                        if (parts[0].Trim() != "")
+                        {
+                            AddShortCutItem(parts[0].Trim(), parts[1].Trim(), "");
+                        }
+                    }
+                    else if (parts.Length == 3)
+                    {
+                        if (parts[0].Trim() != "")
+                        {
+                            AddShortCutItem(parts[0].Trim(), parts[1].Trim(), parts[2].Trim());
+                        }
                     }
                 }
 
@@ -639,7 +674,8 @@ namespace TaskTrayQuickLaunch
 
         private void AddPathShortcut(object sender, EventArgs e)
         {
-
+            AddShortCutItem("", "", "");
+            BuildMainMenuItems();
         }
 
         private void AddFolderShortcut(object sender, EventArgs e)
@@ -653,7 +689,7 @@ namespace TaskTrayQuickLaunch
                     if (Directory.Exists(selectedPath))
                     {
                         string[] paths = selectedPath.Split('\\');
-                        AddShortCutItem(paths[paths.Length -1], selectedPath);
+                        AddShortCutItem(paths[paths.Length -1], selectedPath, "");
                         SaveShortCutIni();
                         BuildMainMenuItems();
                     }
@@ -676,7 +712,7 @@ namespace TaskTrayQuickLaunch
                     // Add the file to the shortcut list
                     // For now, just log it to debug output
                     System.Diagnostics.Debug.WriteLine("Added shortcut: " + filePath);
-                    AddShortCutItem(Path.GetFileNameWithoutExtension(filePath), filePath);
+                    AddShortCutItem(Path.GetFileNameWithoutExtension(filePath), filePath, "");
                     SaveShortCutIni();
                     BuildMainMenuItems();
                 }
