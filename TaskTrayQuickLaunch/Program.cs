@@ -1,3 +1,5 @@
+#define VALID_CODE
+
 using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
@@ -5,6 +7,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Resources;
@@ -44,23 +47,49 @@ namespace TaskTrayQuickLaunch
         }
     }
 
+
+    /************************************************************************************************/
+    /* 定数定義                                                                                     */
+    /************************************************************************************************/
+    static class Constants
+    {
+        public const int SHORTCUT_WIDTH         = 200;
+        public const int ICON_SIZE              = 16;
+        public const int LABEL_HEIGHT           = 16;
+        public const int TEXT_BOX_HEIGHT        = 24;
+        public const int MENU_HIDE_INTERVAL     = 10000;
+        public const int MENU_SUPPRESS_INTERVAL = 1000;
+    }
+
+
+    /************************************************************************************************/
+    /* カスタムアイテムからアプリケーションへイベント通知用インターフェイス                         */
+    /************************************************************************************************/
+    public interface ApplicationEventHandler
+    {
+        public void item_on_click(object sender, MouseEventArgs e);
+        public void item_add_path(string name, string path);
+        public void on_focus(int index);
+    }
+
+
     /************************************************************************************************/
     /* メインメニュー用のカスタムアイテムクラス                                                     */
     /************************************************************************************************/
     public class CustomToolStripMenuItem : UserControl
     {
         private string start_path;
-        private Action<object, MouseEventArgs> on_click;
         private ToolTip toolTip;
         private bool locked = false;
+        private ApplicationEventHandler event_handler;
 
         /* コンストラクタ */
-        public CustomToolStripMenuItem(String text, Image icon, String path, Action<object , MouseEventArgs> onclick)
+        public CustomToolStripMenuItem(String text, Image icon, String path, ApplicationEventHandler event_handler)
         {
             InitializeComponent(text, icon, path);
 
-            /* 上位から指定のクリックハンドラを登録しておく */
-            this.on_click = onclick;
+            /* 上位からイベントハンドラを登録しておく */
+            this.event_handler = event_handler;
         }
 
         /* 初期化処理 */
@@ -86,7 +115,7 @@ namespace TaskTrayQuickLaunch
             };
             pictureBox.MouseLeave += CustomMouseLeave;
             pictureBox.MouseEnter += CustomMouseEnter;
-            pictureBox.MouseClick += CutomeMouseClick;
+            pictureBox.MouseClick += CustomMouseClick;
 
             var layout = new FlowLayoutPanel
             {
@@ -94,12 +123,11 @@ namespace TaskTrayQuickLaunch
                 WrapContents = false,
                 Padding = new Padding(0),
                 Margin = new Padding(0),
-                Size = new Size(150, 16),  // 明示的に高さを固定
                 AutoSize = true           // 自動サイズ調整を無効化
             };
             layout.MouseLeave += CustomMouseLeave;
             layout.MouseEnter += CustomMouseEnter;
-            layout.MouseClick += CutomeMouseClick;
+            layout.MouseClick += CustomMouseClick;
             layout.Controls.Add(pictureBox);
 
             toolTip = new ToolTip();
@@ -112,15 +140,15 @@ namespace TaskTrayQuickLaunch
                 var label = new System.Windows.Forms.Label
                 {
                     Text = text,
-                    Size = new Size(150 - 16, 16),
-//                  TextAlign = ContentAlignment.MiddleLeft,
+                    Size = new Size(150 - Constants.ICON_SIZE, Constants.LABEL_HEIGHT),
                     Dock = DockStyle.Fill
                 };
                 label.MouseLeave += CustomMouseLeave;
                 label.MouseEnter += CustomMouseEnter;
-                label.MouseClick += CutomeMouseClick;
+                label.MouseClick += CustomMouseClick;
 
                 toolTip.SetToolTip(label, path);
+                layout.Size = new Size(Constants.SHORTCUT_WIDTH, Constants.LABEL_HEIGHT);
                 layout.Controls.Add(label);
             }
             else
@@ -128,18 +156,37 @@ namespace TaskTrayQuickLaunch
                 var text_box = new TextBox
                 {
                     Text = "",
-                    Size = new Size(150 - 16, 16),
+                    Size = new Size(150 - Constants.ICON_SIZE, Constants.TEXT_BOX_HEIGHT),
                     Dock = DockStyle.Fill
                 };
 
-                text_box.Enter += CutomeEnter;
+                /* クリップボードにテキストが入っている場合は、それを初期値にする */
+                if (Clipboard.ContainsText())
+                {
+                    string clip_text = Clipboard.GetText();
+                    Console.WriteLine("Clipboard Text: " + clip_text);
+                    text_box.Text = clip_text;
+                }
+                else
+                {
+                    text_box.Text = "new shortcut";
+                }
+
+                    text_box.KeyDown += CustomKeyDown;
+                layout.Size = new Size(Constants.SHORTCUT_WIDTH, Constants.TEXT_BOX_HEIGHT);
                 layout.Controls.Add(text_box);
             }
 
             this.Controls.Add(layout);
             this.MouseLeave += CustomMouseLeave;
             this.MouseEnter += CustomMouseEnter;
-            this.MouseClick += CutomeMouseClick;
+            this.MouseClick += CustomMouseClick;
+        }
+
+        public string GetStartPath()
+        {
+            // Return the start path associated with this item
+            return start_path;
         }
 
         /* アイテムの選択状態 取得 */
@@ -163,22 +210,66 @@ namespace TaskTrayQuickLaunch
                 return; // If locked, do not change the selection state
             }
 
+            /* メニュー上で操作がある場合は、タイムアウトを延長する */
+            if (selected)
+            {
+                event_handler.on_focus((int)this.Tag);
+            }
             this.BackColor = selected ? SystemColors.Highlight : SystemColors.Control;
         }
 
-        private void CutomeEnter(object sender, EventArgs e)
+        /* TextBoxへの入力確定処理 */
+        private void CustomKeyDown(object sender, KeyEventArgs e)
         {
-
+            if (e.KeyCode == Keys.Enter)
+            {
+                if (sender is TextBox text_box)
+                {
+                    System.Diagnostics.Debug.WriteLine("Enter Key Pressed! : " + text_box.Text);
+                    if (Uri.IsWellFormedUriString(text_box.Text, UriKind.Absolute))
+                    {
+                        string[] paths = text_box.Text.Split('/');
+                        string name = paths[paths.Length - 1];
+                        if (name == "")
+                        {
+                            if (paths.Length > 1)
+                            {
+                                name = paths[paths.Length - 2];
+                            }
+                            else
+                            {
+                                name = text_box.Text;
+                            }
+                        }
+                        event_handler.item_add_path(name, text_box.Text);
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                    else if (File.Exists(text_box.Text))
+                    {
+                        event_handler.item_add_path(Path.GetFileNameWithoutExtension(text_box.Text), text_box.Text);
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                    else if (Directory.Exists(text_box.Text))
+                    {
+                        string[] paths = text_box.Text.Split('\\');
+                        event_handler.item_add_path(paths[paths.Length -1], text_box.Text);
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                }
+            }
         }
 
         /* アイテムクリック時のハンドラ */
-        private void CutomeMouseClick(object sender, MouseEventArgs e)
+        private void CustomMouseClick(object sender, MouseEventArgs e)
         {
             // Handle click event
             if (e.Button == MouseButtons.Right)
             {
             }
-            else
+            else if (start_path != "")
             {
                 /* シェルからstart経由でショートカットを呼び出す */
                 System.Diagnostics.Process.Start(new ProcessStartInfo
@@ -188,7 +279,7 @@ namespace TaskTrayQuickLaunch
                 });
             }
 
-            on_click(sender, e);
+            event_handler.item_on_click(sender, e);
         }
 
         /* マウスカーソルがアイテムから外れた */
@@ -208,6 +299,26 @@ namespace TaskTrayQuickLaunch
     }
 
 
+    public class CustomMenuStrip : ContextMenuStrip
+    {
+        public CustomMenuStrip(Container container)
+            : base(container) // 明示してもしなくてもOK
+        {
+            // 初期化コード
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            System.Diagnostics.Debug.WriteLine("main_nenu.keydown! : " + keyData);
+            if (keyData == Keys.Escape)
+            {
+                this.Close();
+                return true; // ハンドリング済み
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+    }
+
     /************************************************************************************************/
     /* ショートカットアイテム情報保持の構造体                                                       */
     /************************************************************************************************/
@@ -222,12 +333,12 @@ namespace TaskTrayQuickLaunch
     /************************************************************************************************/
     /* アプリケーションのメインクラス                                                               */
     /************************************************************************************************/
-    public class TTQLApplicationContext : ApplicationContext
+    public class TTQLApplicationContext : ApplicationContext, ApplicationEventHandler
     {
         private const String INI_FILE_NAME = "TaskTrayQuickLaunch.ini";
         private NotifyIcon notifyIcon;
         private ContextMenuStrip sub_menu;
-        private ContextMenuStrip main_menu;
+        private CustomMenuStrip main_menu;
         private ToolStripMenuItem menu_version;
         private ToolStripMenuItem menu_add_file;
         private ToolStripMenuItem menu_add_folder;
@@ -235,6 +346,7 @@ namespace TaskTrayQuickLaunch
         private ToolStripMenuItem menu_delete;
         private ToolStripMenuItem menu_move_up;
         private ToolStripMenuItem menu_move_down;
+        private ToolStripMenuItem menu_rename;
         private ToolStripMenuItem menu_close;
         private ToolStripMenuItem menu_exit;
         private ToolStripTextBox menu_path_edit;
@@ -245,6 +357,7 @@ namespace TaskTrayQuickLaunch
         private string browser_path;
         private string chrome_path = "";
         private List<ShortCutItem> shortCutList = new List<ShortCutItem>();
+        private TextBox focus_text_box;
 
         /* コンストラクタ */
         public TTQLApplicationContext()
@@ -252,8 +365,17 @@ namespace TaskTrayQuickLaunch
             GetFtypeText();
 
             LoadShortCutIni();
-            main_menu = new ContextMenuStrip(new Container());
-            main_menu.AutoClose = false;
+            main_menu = new CustomMenuStrip(new Container());
+            main_menu.Opened += main_menu_Opened; // Add event handler for opening
+            main_menu.PreviewKeyDown += (s, e) =>
+            {
+                System.Diagnostics.Debug.WriteLine("main_nenu.keydown! : " + e.KeyCode);
+                if (e.KeyCode == Keys.Escape)
+                {
+                    main_menu_closing();
+                }
+            };
+
             BuildMainMenuItems();
 
             ConstructSubMenuItems();
@@ -272,7 +394,7 @@ namespace TaskTrayQuickLaunch
             /* MouseMoveで表示したメインメニューを、10秒でCloseする */
             closeTimer = new System.Windows.Forms.Timer
             {
-                Interval = 10000, // 10秒
+                Interval = Constants.MENU_HIDE_INTERVAL,
                 Enabled = false
             };
             closeTimer.Tick += (s, e) =>
@@ -281,12 +403,37 @@ namespace TaskTrayQuickLaunch
                 {
                     main_menu_closing();
                 }
+
+                if (sub_menu.Visible)
+                {
+                    sub_menu.Hide();
+                }
+                LockMainMenuSelect(false);
                 closeTimer.Stop();
                 suppressShow = false;
             };
-
         }
 
+        private void main_menu_Opened(object sender, EventArgs e)
+        {
+            System.Diagnostics.Debug.WriteLine("main_menu_Opened");
+            main_menu.BeginInvoke(new Action(() =>
+            {
+                if (focus_text_box != null)
+                {
+                    System.Diagnostics.Debug.WriteLine("main_menu_Opened focus on text_box!");
+                    focus_text_box.Focus(); // Set focus to the text box if it exists
+                    focus_text_box.SelectAll(); // Select all text in the text box
+                }
+            }));
+        }
+
+        /* メインメニューが開く際の前処理 */
+        private void main_menu_Opening(object sender, CancelEventArgs e)
+        {
+        }
+
+        /* サブメニュークローズ時の処理 */
         private void sub_menu_Closing(object sender, CancelEventArgs e)
         {
             LockMainMenuSelect(false);
@@ -302,13 +449,19 @@ namespace TaskTrayQuickLaunch
                 menu_delete.Enabled = true;
                 menu_move_up.Enabled = true;
                 menu_move_down.Enabled = true;
+                menu_rename.Enabled = true;
             }
             else
             {
                 // No item selected, disable the delete option
+//              sub_menu.Items.Remove(menu_delete);
+//              sub_menu.Items.Remove(menu_move_down);
+//              sub_menu.Items.Remove(menu_move_up);
+//              sub_menu.Items.Remove(menu_rename);
                 menu_delete.Enabled = false;
                 menu_move_down.Enabled = false;
                 menu_move_up.Enabled = false;
+                menu_rename.Enabled = false;
             }
             LockMainMenuSelect(true);
         }
@@ -413,24 +566,17 @@ namespace TaskTrayQuickLaunch
             sub_menu.Closing += sub_menu_Closing;
             var infoVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
             menu_version = new ToolStripMenuItem($"{Application.ProductName} v{infoVersion}")
-//          menu_version = new ToolStripMenuItem($"{Application.ProductName} v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}")
-//          menu_version = new ToolStripMenuItem($"{Application.ProductName} v{Assembly.GetExecutingAssembly().GetName().Version}")
             {
                 Enabled = false
             };
-            menu_add_file = new ToolStripMenuItem("add File", null, AddFileShortcut);
-            menu_add_folder = new ToolStripMenuItem("add Folder", null, AddFolderShortcut);
-            menu_add_path = new ToolStripMenuItem("add Path", null, AddPathShortcut);
-            menu_delete = new ToolStripMenuItem("delete", null, DelShortcut);
+            menu_add_file = new ToolStripMenuItem("Add File", null, AddFileShortcut);
+            menu_add_folder = new ToolStripMenuItem("Add Folder", null, AddFolderShortcut);
+            menu_add_path = new ToolStripMenuItem("Add Path", null, AddPathShortcut);
+            menu_delete = new ToolStripMenuItem("Delete", null, DelShortcut);
             menu_exit = new ToolStripMenuItem("Exit", null, Exit);
-            menu_move_down = new ToolStripMenuItem("Move Down", null, (s, e) =>
-            {
-                // Implement move down logic here
-            });
-            menu_move_up = new ToolStripMenuItem("Move Up", null, (s, e) =>
-            {
-                // Implement move up logic here
-            });
+            menu_move_down = new ToolStripMenuItem("Move Down", null, SubMenuMoveDown);
+            menu_move_up = new ToolStripMenuItem("Move Up", null, SubMenuMoveUp);
+            menu_rename = new ToolStripMenuItem("Rename", null, SubMenuRename);
             menu_close = new ToolStripMenuItem("Close", null, (s, e) =>
             {
                 main_menu_closing();
@@ -454,6 +600,7 @@ namespace TaskTrayQuickLaunch
             sub_menu.Items.Add(menu_add_path);
             sub_menu.Items.Add(menu_move_up);
             sub_menu.Items.Add(menu_move_down);
+            sub_menu.Items.Add(menu_rename);
             sub_menu.Items.Add(menu_delete);
             sub_menu.Items.Add(menu_close);
             sub_menu.Items.Add(menu_exit);
@@ -461,10 +608,19 @@ namespace TaskTrayQuickLaunch
 
 
 
-        /* メインメニューアイテムのクリックハンドラ（カスタムアイテムからのコールバックでメニューを閉じる） */
-        private void main_menu_onClick(object sender, MouseEventArgs e)
+        /* パス指定のアイテム追加 */
+        public void item_add_path(string name, string path)
         {
-            System.Diagnostics.Debug.WriteLine("main_menu_onClick : " + e.Button);
+            AddShortCutItem(name, path, "");
+            DelShortCutItem("");                              /* 編集中のショートカットを削除する */
+            SaveShortCutIni();
+            BuildMainMenuItems();
+        }
+
+        /* メインメニューアイテムのクリックハンドラ（カスタムアイテムからのコールバックでメニューを閉じる） */
+        public void  item_on_click(object sender, MouseEventArgs e)
+        {
+            System.Diagnostics.Debug.WriteLine("item_on_click : " + e.Button);
             if (e.Button == MouseButtons.Left)
             {
                 main_menu.BeginInvoke(new Action(() =>
@@ -474,7 +630,7 @@ namespace TaskTrayQuickLaunch
             }
             else if (e.Button == MouseButtons.Right)
             {
-                
+
             }
         }
 
@@ -493,7 +649,8 @@ namespace TaskTrayQuickLaunch
             }
         }
 
-        private CustomToolStripMenuItem get_custome_item(ToolStripItem item)
+        /* ToolStripItemからカスタムアイテムを取得する */
+        private CustomToolStripMenuItem get_custom_item(ToolStripItem item)
         {
             if (item is ToolStripControlHost controlHost && controlHost.Control is CustomToolStripMenuItem customItem)
             {
@@ -525,12 +682,15 @@ namespace TaskTrayQuickLaunch
         {
             // Clear existing items
             main_menu.Items.Clear();
+            focus_text_box = null;
             // Add shortcuts from the list
+#if VALID_CODE
+            int index = 0;
             foreach (var item in shortCutList)
             {
-                CustomToolStripMenuItem custom_item = new CustomToolStripMenuItem(item.Name, item.Icon?.ToBitmap(), item.Path, main_menu_onClick)
+                CustomToolStripMenuItem custom_item = new CustomToolStripMenuItem(item.Name, item.Icon?.ToBitmap(), item.Path, this)
                 {
-                    Tag = item.Path,
+                    Tag = index++,
                     AutoSize = true,
                 };
                 ToolStripControlHost menuItem = new ToolStripControlHost(custom_item)
@@ -540,9 +700,19 @@ namespace TaskTrayQuickLaunch
                     Margin =  Padding.Empty,
                 };
 
-                menuItem.MouseMove += IconOnMouseMove;
+                if (item.Path == "")
+                {
+                    focus_text_box = custom_item.Controls.OfType<FlowLayoutPanel>().FirstOrDefault().Controls.OfType<TextBox>().FirstOrDefault();
+                }
                 main_menu.Items.Add(menuItem);
             }
+#else
+            main_menu.Items.AddRange(new ToolStripItem[]
+            {
+                new ToolStripSeparator(),
+                new ToolStripSeparator()
+            });
+#endif
         }
 
         /* ショートカットアイテムの削除 */
@@ -678,6 +848,7 @@ namespace TaskTrayQuickLaunch
         {
             // Show the main menu at the current cursor position
             main_menu.Show(new Point(Cursor.Position.X - 220, Cursor.Position.Y - main_menu.Height - 32));
+            main_menu.AutoClose = false;
             main_menu.Focus();
         }
 
@@ -691,14 +862,24 @@ namespace TaskTrayQuickLaunch
         /* メインメニューのクローズ処理 */
         private void main_menu_closing()
         {
-            DelShortCutItem("");                              /* 編集中のショートカットが残っている場合は、削除する */
-            BuildMainMenuItems();
-            main_menu.Close();
-            
+            System.Diagnostics.Debug.WriteLine("main_menu_closing()");
+            if (focus_text_box != null)
+            {
+                DelShortCutItem("");                              /* 編集中のショートカットが残っている場合は、削除する */
+                BuildMainMenuItems();
+                main_menu.Close();
+            }
+            else
+            {
+                main_menu.AutoClose = true;
+                LockMainMenuSelect(false);
+                main_menu.Hide();
+            }
+
             /* クローズして1秒間はMouseMoveによる再表示を抑止する */
             suppressShow = true;
             closeTimer.Stop();
-            closeTimer.Interval = 1000;
+            closeTimer.Interval = Constants.MENU_SUPPRESS_INTERVAL;
             closeTimer.Start();
         }
 
@@ -710,7 +891,6 @@ namespace TaskTrayQuickLaunch
                 /* メインメニューが表示していたらクローズ、表示していなければ表示する */
                 if (main_menu.Visible)
                 {
-                    System.Diagnostics.Debug.WriteLine("main_menu.Hide();");
                     main_menu_closing();
                 }
                 else
@@ -721,10 +901,6 @@ namespace TaskTrayQuickLaunch
             }
             else if (e.Button == MouseButtons.Right)
             {
-                if (main_menu.Visible)
-                {
-                    main_menu.Hide();
-                }
                 DisplaySubMenu();
             }
         }
@@ -732,7 +908,6 @@ namespace TaskTrayQuickLaunch
         /* NotifyIconのマウスムーブイベント */
         private void IconOnMouseMove(object sender, System.Windows.Forms.MouseEventArgs e)
         {
-//          System.Diagnostics.Debug.WriteLine("MouseMove: " + e.Location);
             if (suppressShow)
             {
                 return; // Do not show the main menu if suppressed
@@ -744,9 +919,7 @@ namespace TaskTrayQuickLaunch
                 DisplayMainMenu();
             }
 
-            closeTimer.Stop();
-            closeTimer.Interval = 10000;
-            closeTimer.Start();
+            on_some_operation();
         }
 
         /* パス or URL指定のショートカット追加 */
@@ -754,6 +927,8 @@ namespace TaskTrayQuickLaunch
         {
             AddShortCutItem("", "", "");
             BuildMainMenuItems();
+            main_menu_Opened((object)sender, EventArgs.Empty);
+            closeTimer.Stop();
         }
 
         /* フォルダへのショートカット追加 */
@@ -811,9 +986,9 @@ namespace TaskTrayQuickLaunch
 
             if (item != null)
             {
-                var customItem = get_custome_item(item);
+                var customItem = get_custom_item(item);
                 // Get the path of the selected item
-                string path = customItem.Tag as string;
+                string path = customItem.GetStartPath();
                 if (!string.IsNullOrEmpty(path))
                 {
                     // Remove the item from the list
@@ -824,37 +999,106 @@ namespace TaskTrayQuickLaunch
             }
         }
 
+        private int GetShortCutIndex(string path)
+        {
+            // Get the index of the shortcut item in the list
+            for (int i = 0; i < shortCutList.Count; i++)
+            {
+                if (shortCutList[i].Path.Equals(path, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+            return -1; // Not found
+        }
+
+        private void SubMenuRename(object sender, EventArgs e)
+        {
+
+        }
+
+        /* アイテムを上に移動 */
         private void SubMenuMoveUp(object sender, EventArgs e)
         {
+            System.Diagnostics.Debug.WriteLine("SubMenuMoveDown");
             var item = selected_item();
             if (item != null)
             {
-                int index = main_menu.Items.IndexOf(item);
+                var custom_item = get_custom_item(item);
+                int index = GetShortCutIndex(custom_item.GetStartPath());
+
                 if (index > 0)
                 {
                     // Move the item up in the list
-                    main_menu.Items.RemoveAt(index);
-                    main_menu.Items.Insert(index - 1, item);
+                    var tmp_item = shortCutList[index];
+                    shortCutList[index] = shortCutList[index - 1];
+                    shortCutList[index - 1] = tmp_item;
+                    // Rebuild the main menu items
+                    SaveShortCutIni();
+                    BuildMainMenuItems();
                 }
             }
         }
 
+        /* アイテムを下に移動 */
         private void SubMenuMoveDown(object sender, EventArgs e)
         {
+            System.Diagnostics.Debug.WriteLine("SubMenuMoveDown");
             var item = selected_item();
             if (item != null)
             {
-                // Get the index of the selected item
-                int index = main_menu.Items.IndexOf(item);
-                if (index < main_menu.Items.Count - 1)
+                var custom_item = get_custom_item(item);
+                int index = GetShortCutIndex(custom_item.GetStartPath());
+
+                if (index >= 0 && index < shortCutList.Count - 1)
                 {
                     // Move the item down in the list
-                    main_menu.Items.RemoveAt(index);
-                    main_menu.Items.Insert(index + 1, item);
+                    var tmp_item = shortCutList[index];
+                    shortCutList[index] = shortCutList[index + 1];
+                    shortCutList[index + 1] = tmp_item;
+                    // Rebuild the main menu items
+                    SaveShortCutIni();
+                    BuildMainMenuItems();
                 }
             }
         }
 
+        public void on_focus(int index)
+        {
+            if (main_menu != null && main_menu.Items.Count > 0)
+            {
+                foreach (ToolStripItem manu_item in main_menu.Items)
+                {
+                    if (manu_item is ToolStripControlHost controlHost && controlHost.Control is CustomToolStripMenuItem customItem)
+                    {
+                        if (customItem.Tag is int selected && (selected != index))
+                        {
+                            customItem.SetSelected(false);
+                        }
+                    }
+                }
+            }
+
+            on_some_operation();
+        }
+
+        private void on_some_operation()
+        {
+            if (focus_text_box == null)
+            {
+                /* マウスムーブで表示した場合は、10秒後に非表示にする */
+                closeTimer.Stop();
+                closeTimer.Interval = Constants.MENU_HIDE_INTERVAL;
+                closeTimer.Start();
+            }
+            else
+            {
+                /* 入力モードの場合は、10秒タイムアウトしない */
+                closeTimer.Stop();
+            }
+        }
+
+        /* サブメニューのExit選択時のハンドラ */
         private void Exit(object sender, EventArgs e)
         {
             notifyIcon.Visible = false;
